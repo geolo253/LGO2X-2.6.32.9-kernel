@@ -46,10 +46,6 @@
 #include <asm/io.h>
 #include <asm/unistd.h>
 
-#if defined (CONFIG_MODEM_MDM)
-extern void star_shutdown_prepare();
-#endif
-
 #ifndef SET_UNALIGN_CTL
 # define SET_UNALIGN_CTL(a,b)	(-EINVAL)
 #endif
@@ -347,9 +343,6 @@ void kernel_power_off(void)
 	kernel_shutdown_prepare(SYSTEM_POWER_OFF);
 	if (pm_power_off_prepare)
 		pm_power_off_prepare();
-#if defined (CONFIG_MODEM_MDM)		
-	star_shutdown_prepare();
-#endif	
 	disable_nonboot_cpus();
 	sysdev_shutdown();
 	printk(KERN_EMERG "Power down.\n");
@@ -1117,8 +1110,12 @@ SYSCALL_DEFINE0(setsid)
 	err = session;
 out:
 	write_unlock_irq(&tasklist_lock);
-	if (err > 0)
+	if (err > 0) {
 		proc_sid_connector(group_leader);
+#ifdef CONFIG_SCHED_AUTOGROUP
+sched_autogroup_create_attach(group_leader);
+#endif
+}
 	return err;
 }
 
