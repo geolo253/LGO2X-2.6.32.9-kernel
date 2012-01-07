@@ -1,3 +1,5 @@
+*~
+*.old
 .config
 .version
 Module.symvers
