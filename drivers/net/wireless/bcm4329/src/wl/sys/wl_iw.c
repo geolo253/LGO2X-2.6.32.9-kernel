@@ -125,10 +125,11 @@ bool            ap_fw_loaded = FALSE;
 #else
 static bool 	ap_fw_loaded = FALSE;
 #endif
-static long ap_cfg_pid = -1;
+//static long ap_cfg_pid = -1;
 struct net_device *ap_net_dev = NULL;
-struct semaphore  ap_eth_sema;
-static struct completion ap_cfg_exited;
+//struct semaphore  ap_eth_sema;
+//static struct completion ap_cfg_exited;
+tsk_ctl_t       ap_eth_ctl;
 static int wl_iw_set_ap_security(struct net_device *dev, struct ap_profile *ap);
 static int wl_iw_softap_deassoc_stations(struct net_device *dev, u8 *mac);
 #if defined(CONFIG_LGE_BCM432X_PATCH)	//20110121
@@ -240,11 +241,13 @@ typedef struct iscan_info {
 	iscan_buf_t * list_hdr;
 	iscan_buf_t * list_cur;
 
-	
+#if 0	
 	long sysioc_pid;
 	struct semaphore sysioc_sem;
 	struct completion sysioc_exited;
-
+#else
+	tsk_ctl_t tsk_ctl;
+#endif
 	uint32 scan_flag;	
 #if defined CSCAN
 	char ioctlbuf[WLC_IOCTL_MEDLEN];
@@ -297,10 +300,13 @@ typedef struct bt_info {
 	bool	dhcp_done; 
 	int	bt_state;
 
-	
+#if 0	
 	long bt_pid;
 	struct semaphore bt_sem;
 	struct completion bt_exited;
+#else
+	tsk_ctl_t tsk_ctl;	
+#endif
 } bt_info_t;
 
 bt_info_t *g_bt = NULL;
@@ -1137,8 +1143,8 @@ wl_iw_set_btcoex_dhcp(
 			
 				WL_TRACE_COEX(("%s bt->bt_state:%d\n",
 					__FUNCTION__, g_bt->bt_state));
-				
-				up(&g_bt->bt_sem);
+					up(&g_bt->tsk_ctl.sema);			
+//				up(&g_bt->bt_sem);
 			}
 		}
 
@@ -3272,7 +3278,8 @@ wl_iw_iscan_get_aplist(
 	if (!extra)
 		return -EINVAL;
 
-	if ((!iscan) || (iscan->sysioc_pid < 0)) {
+//	if ((!iscan) || (iscan->sysioc_pid < 0)) {
+	if ((!iscan) || (iscan->tsk_ctl.thr_pid < 0)) {
 		WL_ERROR(("%s error\n", __FUNCTION__));
 		return 0;
 	}
@@ -3393,7 +3400,8 @@ wl_iw_timerfunc(ulong data)
 		iscan->timer_on = 0;
 		if (iscan->iscan_state != ISCAN_STATE_IDLE) {
 			WL_TRACE(("timer trigger\n"));
-			up(&iscan->sysioc_sem);
+//			up(&iscan->sysioc_sem);
+			up(&iscan->tsk_ctl.sema);
 		}
 	}
 }
@@ -3514,12 +3522,27 @@ static int
 _iscan_sysioc_thread(void *data)
 {
 	uint32 status;
-	iscan_info_t *iscan = (iscan_info_t *)data;
+
+	tsk_ctl_t *tsk_ctl = (tsk_ctl_t *)data;
+	iscan_info_t *iscan = (iscan_info_t *) tsk_ctl->parent;
+//	iscan_info_t *iscan = (iscan_info_t *)data;
 	static bool iscan_pass_abort = FALSE;
 	DAEMONIZE("iscan_sysioc");
 
 	status = WL_SCAN_RESULTS_PARTIAL;
+#if 0
 	while (down_interruptible(&iscan->sysioc_sem) == 0) {
+#else
+
+	complete(&tsk_ctl->completed);
+
+	while (down_interruptible(&tsk_ctl->sema) == 0) {
+
+		SMP_RD_BARRIER_DEPENDS();
+		if (tsk_ctl->terminated) {
+			break;
+		}
+#endif
 
 #if defined(SOFTAP)
 		
@@ -3599,7 +3622,8 @@ _iscan_sysioc_thread(void *data)
 		del_timer_sync(&iscan->timer);
 		iscan->timer_on = 0;
 	}
-	complete_and_exit(&iscan->sysioc_exited, 0);
+//	complete_and_exit(&iscan->sysioc_exited, 0);
+	complete_and_exit(&tsk_ctl->completed, 0);
 }
 #endif 
 
@@ -4037,7 +4061,8 @@ wl_iw_iscan_set_scan(
 #endif 
 
 	
-	if ((!iscan) || (iscan->sysioc_pid < 0)) {
+//	if ((!iscan) || (iscan->sysioc_pid < 0)) {
+	if ((!iscan) || (iscan->tsk_ctl.thr_pid < 0)) {
 		WL_ERROR(("%s error \n",  __FUNCTION__));
 		return 0;
 	}
@@ -4611,7 +4636,8 @@ wl_iw_iscan_get_scan(
 	}
 #endif	
 	
-	if ((!iscan) || (iscan->sysioc_pid < 0)) {
+//	if ((!iscan) || (iscan->sysioc_pid < 0)) {
+	if ((!iscan) || (iscan->tsk_ctl.thr_pid < 0)) {
 		WL_ERROR(("%ssysioc_pid\n", __FUNCTION__));
 		return EAGAIN;
 	}
@@ -6697,26 +6723,35 @@ exit_proc:
 
 static int thr_wait_for_2nd_eth_dev(void *data)
 {
-	struct net_device *dev = (struct net_device *)data;
+//	struct net_device *dev = (struct net_device *)data;
 	wl_iw_t *iw;
 	int ret = 0;
 	unsigned long flags;
+
+	tsk_ctl_t *tsk_ctl = (tsk_ctl_t *)data;
+	struct net_device *dev = (struct net_device *)tsk_ctl->parent;
+	iw = *(wl_iw_t **)netdev_priv(dev);
 
 	DAEMONIZE("wl0_eth_wthread");
 
 	WL_SOFTAP(("\n>%s threda started:, PID:%x\n", __FUNCTION__, current->pid));
 
-	iw = *(wl_iw_t **)netdev_priv(dev);
+//	iw = *(wl_iw_t **)netdev_priv(dev);
 	if (!iw) {
 		WL_ERROR(("%s: dev is null\n", __FUNCTION__));
+		tsk_ctl->thr_pid = -1;
+		complete(&tsk_ctl->completed);
 		return -1;
 	}
 
 	WAKE_LOCK_INIT(iw->pub, WAKE_LOCK_SOFTAP_THREAD, "SoftAP_WT_THREAD");
 	WAKE_LOCK(iw->pub, WAKE_LOCK_SOFTAP_THREAD);
 
+	complete(&tsk_ctl->completed);
+
 #ifndef BCMSDIOH_STD
-	if (down_timeout(&ap_eth_sema,  msecs_to_jiffies(5000)) != 0) {
+//	if (down_timeout(&ap_eth_sema,  msecs_to_jiffies(5000)) != 0) {
+	if (down_timeout(&tsk_ctl->sema,  msecs_to_jiffies(5000)) != 0) {
 		WL_ERROR(("\n%s: sap_eth_sema timeout \n", __FUNCTION__));
 		ret = -1;
 		goto fail;
@@ -6747,7 +6782,8 @@ fail:
 	WAKE_LOCK_DESTROY(iw->pub, WAKE_LOCK_SOFTAP_THREAD);
 	WL_SOFTAP(("\n>%s, thread completed\n", __FUNCTION__));
 
-	complete_and_exit(&ap_cfg_exited, 0);
+//	complete_and_exit(&ap_cfg_exited, 0);
+	complete_and_exit(&tsk_ctl->completed, 0);
 	return ret;
 }
 #endif 
@@ -6883,7 +6919,9 @@ static int set_ap_cfg(struct net_device *dev, struct ap_profile *ap)
 #ifndef AP_ONLY
 
 		
-		sema_init(&ap_eth_sema, 0);
+	//	sema_init(&ap_eth_sema, 0);
+                sema_init(&ap_eth_ctl.sema, 0);
+
 #if defined(CONFIG_LGE_BCM432X_PATCH)	//20110121
                 ap_priv_running = TRUE;
 #endif
@@ -7022,14 +7060,22 @@ static int set_ap_cfg(struct net_device *dev, struct ap_profile *ap)
 		res, __FUNCTION__));
 		goto fail;
 	}
-
+#if 0
 	if (ap_cfg_running == FALSE) {
 		 init_completion(&ap_cfg_exited);
 		 
 		ap_cfg_pid = kernel_thread(thr_wait_for_2nd_eth_dev, dev, 0);
 	} else {
 		ap_cfg_pid = -1;
-		
+#else
+
+	if (ap_cfg_running == FALSE) {
+
+		PROC_START(thr_wait_for_2nd_eth_dev, dev, &ap_eth_ctl, 0);
+	} else {
+		ap_eth_ctl.thr_pid = -1;
+
+#endif	
 		if (ap_net_dev == NULL) {
 			WL_ERROR(("%s ERROR: ap_net_dev is NULL !!!\n", __FUNCTION__));
 			goto fail;
@@ -7541,10 +7587,16 @@ static int
 
 	
 #ifndef AP_ONLY
+#if 0
 	if (ap_cfg_pid >= 0) {
 		wait_for_completion(&ap_cfg_exited);
 		ap_cfg_pid = -1;
 	}
+#else
+	if (ap_eth_ctl.thr_pid >= 0) {
+		wait_for_completion(&ap_eth_ctl.completed);
+	}
+#endif
 	if ((res = wl_iw_set_ap_security(dev, &my_ap)) != 0) {
 		WL_ERROR((" %s ERROR setting SOFTAP security in :%d\n", __FUNCTION__, res));
 	}
@@ -8945,10 +8997,12 @@ wl_iw_event(struct net_device *dev, wl_event_msg_t *e, void* data)
 
 	case WLC_E_SCAN_COMPLETE:
 #if defined(WL_IW_USE_ISCAN)
-		if ((g_iscan) && (g_iscan->sysioc_pid >= 0) &&
+//		if ((g_iscan) && (g_iscan->sysioc_pid >= 0) &&
+		if ((g_iscan) && (g_iscan->tsk_ctl.thr_pid >= 0) &&
 			(g_iscan->iscan_state != ISCAN_STATE_IDLE))
 		{
-			up(&g_iscan->sysioc_sem);
+//			up(&g_iscan->sysioc_sem);
+			up(&g_iscan->tsk_ctl.sema);
 		} else {
 			cmd = SIOCGIWSCAN;
 			wrqu.data.length = strlen(extra);
@@ -9136,15 +9190,29 @@ wl_iw_bt_timerfunc(ulong data)
 	bt_local->timer_on = 0;
 	WL_TRACE(("%s\n", __FUNCTION__));
 	
-	up(&bt_local->bt_sem);
+	//up(&bt_local->bt_sem);
+        up(&bt_local->tsk_ctl.sema);
+
 }
 
 static int
 _bt_dhcp_sysioc_thread(void *data)
 {
+	tsk_ctl_t *tsk_ctl =  (tsk_ctl_t *)data;
+
+
 	DAEMONIZE("dhcp_sysioc");
 
-	while (down_interruptible(&g_bt->bt_sem) == 0) {
+//	while (down_interruptible(&g_bt->bt_sem) == 0) {
+	complete(&tsk_ctl->completed);
+
+	while (down_interruptible(&tsk_ctl->sema) == 0) {
+
+		SMP_RD_BARRIER_DEPENDS();
+		if (tsk_ctl->terminated) {
+			break;
+		}
+
 		if (g_bt->timer_on) {
 			del_timer_sync(&g_bt->timer);
 			g_bt->timer_on = 0;
@@ -9207,7 +9275,8 @@ _bt_dhcp_sysioc_thread(void *data)
 		del_timer_sync(&g_bt->timer);
 		g_bt->timer_on = 0;
 	}
-	complete_and_exit(&g_bt->bt_exited, 0);
+//	complete_and_exit(&g_bt->bt_exited, 0);
+	complete_and_exit(&tsk_ctl->completed, 0);
 }
 
 static void
@@ -9219,9 +9288,14 @@ wl_iw_bt_release(void)
 		return;
 	}
 
+#if 0
 	if (bt_local->bt_pid >= 0) {
 		KILL_PROC(bt_local->bt_pid, SIGTERM);
 		wait_for_completion(&bt_local->bt_exited);
+#else
+	if (bt_local->tsk_ctl.thr_pid >= 0) {
+		PROC_STOP(&bt_local->tsk_ctl);
+#endif
 	}
 	kfree(bt_local);
 	g_bt = NULL;
@@ -9237,7 +9311,7 @@ wl_iw_bt_init(struct net_device *dev)
 		return -ENOMEM;
 
 	memset(bt_dhcp, 0, sizeof(bt_info_t));
-	bt_dhcp->bt_pid = -1;
+//	bt_dhcp->bt_pid = -1;
 	g_bt = bt_dhcp;
 	bt_dhcp->dev = dev;
 	bt_dhcp->bt_state = BT_DHCP_IDLE;
@@ -9250,10 +9324,15 @@ wl_iw_bt_init(struct net_device *dev)
 	bt_dhcp->ts_dhcp_start = 0;
 	bt_dhcp->ts_dhcp_ok = 0;
 
+#if 0
 	sema_init(&bt_dhcp->bt_sem, 0);
 	init_completion(&bt_dhcp->bt_exited);
 	bt_dhcp->bt_pid = kernel_thread(_bt_dhcp_sysioc_thread, bt_dhcp, 0);
 	if (bt_dhcp->bt_pid < 0) {
+#else
+	PROC_START(_bt_dhcp_sysioc_thread, bt_dhcp, &bt_dhcp->tsk_ctl, 0);
+	if (bt_dhcp->tsk_ctl.thr_pid < 0) {
+#endif
 		WL_ERROR(("Failed in %s\n", __FUNCTION__));
 		return -ENOMEM;
 	}
@@ -9292,7 +9371,7 @@ int wl_iw_attach(struct net_device *dev, void * dhdp)
 	if (!iscan->iscan_ex_params_p)
 		return -ENOMEM;
 	iscan->iscan_ex_param_size = params_size;
-	iscan->sysioc_pid = -1;
+//	iscan->sysioc_pid = -1;
 	
 	g_iscan = iscan;
 	iscan->dev = dev;
@@ -9310,11 +9389,17 @@ int wl_iw_attach(struct net_device *dev, void * dhdp)
 	iscan->timer.data = (ulong)iscan;
 	iscan->timer.function = wl_iw_timerfunc;
 
+#if 0
 	sema_init(&iscan->sysioc_sem, 0);
 	init_completion(&iscan->sysioc_exited);
 	iscan->sysioc_pid = kernel_thread(_iscan_sysioc_thread, iscan, 0);
 	if (iscan->sysioc_pid < 0)
 		return -ENOMEM;
+#else
+	PROC_START(_iscan_sysioc_thread, iscan, &iscan->tsk_ctl, 0);
+	if (iscan->tsk_ctl.thr_pid < 0)
+		return -ENOMEM;
+#endif
 #endif 
 
 	iw = *(wl_iw_t **)netdev_priv(dev);
@@ -9353,10 +9438,16 @@ void wl_iw_detach(void)
 
 	if (!iscan)
 		return;
+#if 0
 	if (iscan->sysioc_pid >= 0) {
 		KILL_PROC(iscan->sysioc_pid, SIGTERM);
 		wait_for_completion(&iscan->sysioc_exited);
 	}
+#else
+	if (iscan->tsk_ctl.thr_pid >= 0) {
+		PROC_STOP(&iscan->tsk_ctl);
+	}	
+#endif
 	MUTEX_LOCK_WL_SCAN_SET();
 	while (iscan->list_hdr) {
 		buf = iscan->list_hdr->next;

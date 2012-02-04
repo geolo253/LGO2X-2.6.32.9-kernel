@@ -56,18 +56,7 @@
 #include "aat2870.h"
 #include "star_bl.h"
 #include "star_gpioi2c.h"
-// 20110808 srinivas.mittapalli@lge.com GPIO Sleep status GPIO patch from P999
-#define AP_SUSPEND_STATUS
 
-#ifdef AP_SUSPEND_STATUS
-typedef struct ModemCheckRec
-{
-    NvOdmServicesGpioHandle gpioHandle;
-    NvOdmGpioPinHandle  pinHandle;
-} ModemCheck;
-
-static ModemCheck s_modemCheck;
-#endif
 
 /*
  * Debug
@@ -266,22 +255,22 @@ static struct aat2870_ctl_tbl_t aat2870bl_normal_tbl[] = {
 /* Set to ALC mode HW-high gain mode*/
 static struct aat2870_ctl_tbl_t aat2870bl_alc_tbl[] = {
     /* ALC table 0~15 20101218 tunning ver. */
-    {0x12,0x19},  /* ALS current setting 5.6mA */
-    {0x13,0x20},  /* ALS current setting 7.2mA */
-    {0x14,0x21},  /* ALS current setting 7.4mA */
-    {0x15,0x23},  /* ALS current setting 7.9mA */
-    {0x16,0x24},  /* ALS current setting 8.1mA */
-    {0x17,0x25},  /* ALS current setting 8.3mA */
-    {0x18,0x27},  /* ALS current setting 9.0mA */
-    {0x19,0x28},  /* ALS current setting 9.5mA */
-    {0x1A,0x29},  /* ALS current setting 10.1mA */
-    {0x1B,0x2A},  /* ALS current setting 10.8mA */
-    {0x1C,0x2F},  /* ALS current setting 11.5mA */
-    {0x1D,0x30},  /* ALS current setting 12.2mA */
-    {0x1E,0x32},  /* ALS current setting 12.8mA */
-    {0x1F,0x35},  /* ALS current setting 13.5mA */
-    {0x20,0x36},  /* ALS current setting 14.2mA */
-    {0x21,0x37},  /* ALS current setting 14.6mA */
+    {0x12,0x19},  /* ALS current setting 5.63mA */
+    {0x13,0x20},  /* ALS current setting 7.20mA */
+    {0x14,0x21},  /* ALS current setting 7.43mA */
+    {0x15,0x23},  /* ALS current setting 7.88mA */
+    {0x16,0x24},  /* ALS current setting 8.10mA */
+    {0x17,0x25},  /* ALS current setting 8.33mA */
+    {0x18,0x27},  /* ALS current setting 8.78mA */
+    {0x19,0x28},  /* ALS current setting 9.0mA */
+    {0x1A,0x29},  /* ALS current setting 9.23mA */
+    {0x1B,0x2A},  /* ALS current setting 9.45mA */
+    {0x1C,0x2F},  /* ALS current setting 10.58mA */
+    {0x1D,0x30},  /* ALS current setting 10.80mA */
+    {0x1E,0x32},  /* ALS current setting 11.25mA */
+    {0x1F,0x35},  /* ALS current setting 11.93mA */
+    {0x20,0x36},  /* ALS current setting 12.15mA */
+    {0x21,0x37},  /* ALS current setting 12.38mA */
 
     { 0x0E, 0x73 },  /* SNSR_LIN_LOG=linear, ALSOUT_LIN_LOG=log, RSET=16k~64k,
                                    * GAIN=low, GM=man gain, ALS_EN=on */
@@ -1037,7 +1026,7 @@ static struct attribute *star_bl_attributes[] = {
 	&dev_attr_alc.attr,
 	&dev_attr_onoff.attr,
 	&dev_attr_hwdim.attr,
-	&dev_attr_lsensor_onoff.attr,
+	&dev_attr_lsensor_onoff.attr,	
 //20110419 km.lee@lge.com LGD panel ver. info
 	&dev_attr_panel_info,
     //20110202, cs77.ha@lge.com, force off [START]
@@ -1093,9 +1082,6 @@ static void star_aat2870_early_suspend(struct early_suspend *es)
 {
 	static struct aat2870_drvdata_t *drv;
 	
-#ifdef AP_SUSPEND_STATUS
-    NvOdmGpioSetState(s_modemCheck.gpioHandle, s_modemCheck.pinHandle, 0);
-#endif
 	drv = drvdata;
 
 	if (drv->status == BL_POWER_STATE_ON) {
@@ -1117,9 +1103,6 @@ static void star_aat2870_late_resume(struct early_suspend *es)
 {
 	static struct aat2870_drvdata_t *drv;
 	
-#ifdef AP_SUSPEND_STATUS
-    NvOdmGpioSetState(s_modemCheck.gpioHandle, s_modemCheck.pinHandle, 1);
-#endif
 	drv = drvdata;
 
 	if (drv->status == BL_POWER_STATE_OFF) {
@@ -1149,9 +1132,7 @@ static int star_aat2870_probe(struct platform_device *pdev)
 	int retval = 0;
 	struct device *dev = &pdev->dev;
 	struct aat2870_drvdata_t *drv;
-#ifdef AP_SUSPEND_STATUS
-    NvU32 pin, port;
-#endif
+
 
 	drv = kzalloc(sizeof(struct aat2870_drvdata_t), GFP_KERNEL);
 	if (drv == NULL) {
@@ -1233,45 +1214,8 @@ static int star_aat2870_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK(&drv->delayed_work_bl, star_bl_work_func);
 	//schedule_delayed_work(&drvdata->delayed_work_bl, 100);
    
-#ifdef AP_SUSPEND_STATUS
-    //GPIO configuration
-    s_modemCheck.gpioHandle = NvOdmGpioOpen();
-    if (!s_modemCheck.gpioHandle)
-    {
-        printk(KERN_ERR "[star modem_chk] NvOdmGpioOpen Error \n");
-        goto err_open_modem_chk_gpio_fail;
-    }
-#if defined(CONFIG_MODEM_IFX)
-    port = 'r'-'a';
-    pin = 0;
-#elif defined(CONFIG_MODEM_MDM)
-#if defined(CONFIG_MACH_STAR_SKT_REV_E) 
-    port = 'r'-'a';
-    pin = 0;
-#else
-    port = 'h'-'a';
-    pin = 2;
-#endif
-#endif 
-    s_modemCheck.pinHandle = NvOdmGpioAcquirePinHandle(s_modemCheck.gpioHandle, 
-                                                    port, pin);
-    if (!s_modemCheck.pinHandle)
-    {
-        printk(KERN_ERR "[star modem_chk] NvOdmGpioAcquirePinHandle Error\n");
-        goto err_modem_chk_gpio_pin_acquire_fail;
-    }
-    NvOdmGpioSetState(s_modemCheck.gpioHandle, s_modemCheck.pinHandle, 1);
-    NvOdmGpioConfig(s_modemCheck.gpioHandle, s_modemCheck.pinHandle, 
-                    NvOdmGpioPinMode_Output);
-#endif
-   
     return 0;
 
-#ifdef AP_SUSPEND_STATUS
-err_modem_chk_gpio_pin_acquire_fail:
-    NvOdmGpioClose(s_modemCheck.gpioHandle); 
-err_open_modem_chk_gpio_fail:
-#endif
 
 err_input_device:
 

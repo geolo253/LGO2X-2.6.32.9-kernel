@@ -31,7 +31,7 @@
 */
 
 //20100610, cs77.ha@lge.com, sleep status gpio for modem [START]
-//#define AP_SUSPEND_STATUS
+#define AP_SUSPEND_STATUS
 //20100610, cs77.ha@lge.com, sleep status gpio for modem [START]
 
 #define AP20_A03_POWERKEY_WAR
@@ -65,11 +65,12 @@
 
 extern void tegra_gpio_disable_all_irq(void);
 // 20110209 byoungwoo.yoon@lge.com disable gpio interrupt during power-off  [END] 
-#if 1
+
+//20101110, jh.ahn@lge.com, Function for Warm-boot [START]
 extern void write_cmd_reserved_buffer(unsigned char *buf, size_t len);
 extern void read_cmd_reserved_buffer(unsigned char *buf, size_t len);
 extern void emergency_restart(void); 
-#endif
+//20101110, jh.ahn@lge.com, Function for Warm-boot [END]
 
 int  pwky_shutdown = 0;
 typedef struct PowerKeyDeviceRec
@@ -553,11 +554,13 @@ static int __init powerkey_probe(struct platform_device *pdev)
         goto err_hwsku_sysfs_fail;
     }
 
+//20101110, jh.ahn@lge.com, Function for Warm-boot [START]
     ret = sysfs_create_group(&pdev->dev.kobj, &star_reset_group);
     if (ret) {
         printk(KERN_ERR "[star powerkey] sysfs_create_group ERROR\n");
         goto err_reset_sysfs_fail;
     }
+//20101110, jh.ahn@lge.com, Function for Warm-boot [END]
 
 // 20110209 byoungwoo.yoon@lge.com disable gpio interrupt during power-off  [START] 
     ret = sysfs_create_group(&pdev->dev.kobj, &star_poweroff_group);
@@ -608,7 +611,7 @@ static int powerkey_remove(struct platform_device *pdev)
 //20100703, cs77.ha@lge.com, PMIC reset [START]
     sysfs_remove_group(&pdev->dev.kobj, &star_pmic_group);
     sysfs_remove_group(&pdev->dev.kobj, &star_hwsku_group);
-    sysfs_remove_group(&pdev->dev.kobj, &star_reset_group);
+    sysfs_remove_group(&pdev->dev.kobj, &star_reset_group); //20101110, jh.ahn@lge.com, Function for Warm-boot
 //20100703, cs77.ha@lge.com, PMIC reset [END]
     
 //20100610, cs77.ha@lge.com, sleep status gpio for modem [START]

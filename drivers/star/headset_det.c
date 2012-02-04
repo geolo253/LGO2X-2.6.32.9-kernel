@@ -120,6 +120,16 @@ int suspend_status = 0;
 //static struct wake_lock hook_det_lock;
 //20101117, cs77.ha@lge.com, gpio wakeup from LP1 [END]
 
+//P990_IFX_GB_PORTING_LGSI_START
+//FIDO - GB Porting [09/08/2011] - Start
+#if 1 //defined (STAR_OPERATOR_FIDO)
+static struct wake_lock headset_wake_lock;		//20110425 heejeong.seo@lge.com headset wake lock timeout
+#endif
+//FIDO - GB Porting [09/08/2011] - End
+//P990_IFX_GB_PORTING_LGSI_END
+
+
+
 
 extern void star_headsetdet_bias(int bias);	//20100421 bergkamp.cho@lge.com for framwork function used in kernel ==> error [LGE]
 extern void star_Mic_bias(int bias);  //20110726 detecting headset when resuming
@@ -227,8 +237,15 @@ static void type_det_work(struct work_struct *work)
 	{
 	    star_headsetdet_bias(1);	
 	    #if HOOK_USE_ADC
-		hook_value = headset_get_hook_adc_value();	
 		
+//FIDO - GB Porting [09/08/2011] - Start
+#if defined (STAR_OPERATOR_FIDO)
+		hook_value = headset_get_hook_adc_average(1);
+#else
+		hook_value = headset_get_hook_adc_value();	
+#endif
+//FIDO - GB Porting [09/08/2011] - End
+	
         if(hook_value > 100)
 			headset_type = STAR_HEADSET;	
 		else
@@ -424,8 +441,18 @@ static void headset_int_handler(void *dev_id)
 	else
 	{
 	    schedule_delayed_work(&headset_sw_data->delayed_work,	msecs_to_jiffies(type_detection_time));	
+//P990_IFX_GB_PORTING_LGSI_START
+#if !defined (STAR_OPERATOR_FIDO)
+	    wake_lock_timeout(&headset_wake_lock, msecs_to_jiffies(type_detection_time + 50));	 //20111017 heejeong.seo@lge.com Problem that no wake up when disconn headset in calling
+#endif
+//P990_IFX_GB_PORTING_LGSI_END
     }
 	NvOdmGpioInterruptDone(s_hHeadsetHandle.hheadsetInterrupt);	//20100420 bergkamp.cho@lge.com for next interrupt (nVidia Interrupt Spec.) [LGE]
+//FIDO - GB Porting [09/08/2011] - Start
+#if defined (STAR_OPERATOR_FIDO)
+	wake_lock_timeout(&headset_wake_lock, msecs_to_jiffies(1500));		 //20110427 heejeong.seo@lge.com headset wake lock timeout
+#endif
+//FIDO - GB Porting [09/08/2011] - End
 }
 
 unsigned int hook_gpio =0;
@@ -720,6 +747,17 @@ static int headsetdet_probe(struct platform_device *pdev)
 	/* Perform initial detection */
 	headset_sw_data = switch_data;
 
+//P990_IFX_GB_PORTING_LGSI_START
+//FIDO - GB Porting [09/08/2011] - Start
+#if 1 //defined (STAR_OPERATOR_FIDO)
+       wake_lock_init(&headset_wake_lock, WAKE_LOCK_SUSPEND, "headset_wlock");		 //20110425 heejeong.seo@lge.com headset wake lock timeout
+#endif
+//FIDO - GB Porting [09/08/2011] - End
+//P990_IFX_GB_PORTING_LGSI_END
+
+	
+
+	
 	//headset_det_work(&switch_data->work);
 	lprintk(D_AUDIO, KERN_ERR "##(Headset_det.c)## headset detection - headset_det_work() first detection - success..!!\n"); //20100421 bergkmap.cho@lge.com [LGE]	
 
@@ -821,7 +859,16 @@ static int headsetdet_remove(struct platform_device *pdev)
 
 	cancel_work_sync(&switch_data->work);
 	cancel_delayed_work_sync(&switch_data->delayed_work);
-	
+//P990_IFX_GB_PORTING_LGSI_START
+//FIDO - GB Porting [09/08/2011] - Start
+#if 1 //defined (STAR_OPERATOR_FIDO)
+	 wake_lock_destroy(&headset_wake_lock);			//20110425 heejeong.seo@lge.com headset wake lock timeout
+#endif	
+//FIDO - GB Porting [09/08/2011] - End
+//P990_IFX_GB_PORTING_LGSI_END
+		
+		
+		
 /*====================== nVidia GPIO Control(S) =======================*/
     NvOdmGpioInterruptUnregister(s_hHeadsetHandle.hGpio, s_hHeadsetHandle.h_Headset_Detection, s_hHeadsetHandle.hheadsetInterrupt);
    
@@ -884,6 +931,12 @@ static int headset_resume(struct platform_device *pdev)
         input_report_key(headset_sw_data->ip_dev_wake, KEY_VOLUMEDOWN, 0);
 		input_sync(headset_sw_data->ip_dev_wake);
         
+//P990_IFX_GB_PORTING_LGSI_START
+#if !defined (STAR_OPERATOR_FIDO)
+	  cancel_delayed_work_sync(&headset_sw_data->delayed_work); //20111017 heejeong.seo@lge.com Problem that no wake up when disconn headset in calling
+#endif
+//P990_IFX_GB_PORTING_LGSI_END
+	  
         schedule_delayed_work(&headset_sw_data->delayed_work,	msecs_to_jiffies(300));	
     }
     

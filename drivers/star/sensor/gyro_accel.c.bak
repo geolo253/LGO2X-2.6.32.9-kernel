@@ -34,8 +34,6 @@
 #include "kxtf9.h"
 
 #include "lge_sensor_verify.h"
-#include "star_accel.h"
-#include "ami304.h"
 
 #define  DEBUG 0
 #define  MISC_DYNAMIC_MINOR		 	255
@@ -43,10 +41,6 @@
 #define  MIN_MOTION_POLLING_TIME    10
 //#define  MIN_MOTION_POLLING_TIME    70//  motion daemon update every 70mS
 //#define MAX_LGE_ACCEL_SAMPLERATE    7  /* for JSR256 API */
-
-int sensor_sleep_st = 0;
-int reboot = 0;
-extern int call_once;
 
 #ifdef CONFIG_HAS_EARLYSUSPEND // wkkim : temporary early suspend apply
 #include <linux/earlysuspend.h>
@@ -75,6 +69,7 @@ static atomic_t snap_flag;
 static atomic_t flip_flag;
 static atomic_t gyro_flag;
 static atomic_t composite_flag;
+static atomic_t sleep_daemon_flag;
 static atomic_t accel_delay;
 static atomic_t compass_delay;
 static atomic_t tilt_delay;
@@ -85,11 +80,6 @@ static atomic_t suspend_flag;
 static atomic_t bypass_flag;
 static atomic_t cal_flag;
 static atomic_t cal_result;
-//LGE_CHANGE_S [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
-static atomic_t gravity_flag;
-static atomic_t linearaccel_flag;
-static atomic_t rotvector_flag;
-//LGE_CHANGE_E [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
 
 static NvBool i2c_busy_flag; //jongik2.kim 20100910 i2c_fix
 
@@ -124,6 +114,7 @@ struct star_motion_device {
 
 	int  						irq;
 	int  						use_irq;
+	wait_queue_head_t   		sensor_wait;
 };
 
 static struct star_motion_device   *star_motion_dev = NULL;
@@ -144,12 +135,10 @@ NvBool compassI2CGetRegs(NvU8 offset, NvU8* value, NvU32 len);
 extern int AMI304_Reset_Init();
 extern int AMI304_Init(int mode);
 extern int kxtf9_get_acceleration_data_passthrough(int *xyz_data);
-extern int tegra_accel_hw_init(void);
-extern int lge_sensor_shutdown_proxi(void);
-extern int lge_sensor_restart_proximity();
-extern int tegra_compass_hw_init(void);
-
 void NvOdmResetI2C(NvOdmGyroAccelHandle );
+extern struct task_struct *sensor_task; 
+void notify_sensor_change_to_daemon(void);
+
 /** Function to close the ODM device. This function will help in switching
  * between power modes
  */
@@ -315,66 +304,6 @@ int  kxtf9_i2c_write(unsigned char *buffer,int length)
 	return status;
 }
 
-int is_tap_enabled(void)
-{
-    return atomic_read(&tap_flag);
-}
-
-int is_flip_enabled(void)
-{
-    return atomic_read(&flip_flag);
-}
-
-int lge_sensor_shoutdown_all(void)
-{
-
-	printk("[%s] reboot gen2 i2c sensors\n",__func__);
-
-	atomic_set(&bypass_flag, 0);
-	
-	//call reboot function
-	lge_sensor_shutdown_compass();
-	lge_sensor_shutdown_kxtf9();
-	lge_sensor_shutdown_proxi();
-	lge_sensor_shutdown_gyro();
-
-	msleep(10);
-
-	// do power down 
-	lge_sensor_restart_gyro();
-	lge_sensor_restart_kxtf9();
-	lge_sensor_restart_compass();
-	lge_sensor_restart_proximity();
-
-	reboot	=	0;
-}
-
-int lge_sensor_shutdown_gyro(void)
-{
-    close_odm_gyro_accel();
-    #if 0
-    unsigned char value = 0;
-    NvOdmResetI2C(star_motion_dev->hOdmGyroAccel);
-    printk("[%s] ### Gyro ## Reset  \n",MOD_TAG);
-
-    if(GYRO_WHID != value)
-        return SENSOR_ERROR;
-#endif
-    return SENSOR_OK;
-}
-int lge_sensor_restart_gyro(void)
-{
-    int err; 
-    
-    err = open_def_odm_gyro_accel();
-    if (!err) {
-        return SENSOR_ERROR;
-#if DEBUG
-        lprintk("open_def_odm_gyro_accel\n");
-#endif
-    }    
-    return SENSOR_OK;
-}
 
 /*---------------------------------------------------------------------------
   motion_sensor_power_on/off
@@ -580,48 +509,6 @@ void motion_send_snap_detection(int direction)
 	}
 }
 
-//LGE_CHANGE_S [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
-#define STAR_GRAVITY_X		0x30
-#define STAR_GRAVITY_Y		0x31
-#define STAR_GRAVITY_Z		0x32
-#define STAR_LINEARACCEL_X	0x33
-#define STAR_LINEARACCEL_Y	0x34
-#define STAR_LINEARACCEL_Z	0x35
-#define STAR_ROTVECTOR_X	0x36
-#define STAR_ROTVECTOR_Y	0x37
-#define STAR_ROTVECTOR_Z	0x38
-
-void motion_send_gravity_detection(int x, int y, int z)
-{
-	if (atomic_read(&gravity_flag)) {
-		input_report_abs(star_motion_dev->input_dev, STAR_GRAVITY_X, x);
-		input_report_abs(star_motion_dev->input_dev, STAR_GRAVITY_Y, y);
-		input_report_abs(star_motion_dev->input_dev, STAR_GRAVITY_Z, z);
-		input_sync(star_motion_dev->input_dev);
-	}
-}
-
-void motion_send_linearaccel_detection(int x, int y, int z)
-{
-	if (atomic_read(&linearaccel_flag)) {
-		input_report_abs(star_motion_dev->input_dev, STAR_LINEARACCEL_X, x);
-		input_report_abs(star_motion_dev->input_dev, STAR_LINEARACCEL_Y, y);
-		input_report_abs(star_motion_dev->input_dev, STAR_LINEARACCEL_Z, z);
-		input_sync(star_motion_dev->input_dev);
-	}
-}
-
-void motion_send_rotvector_detection(int x, int y, int z)
-{
-	if (atomic_read(&rotvector_flag)) {
-		input_report_abs(star_motion_dev->input_dev, STAR_ROTVECTOR_X, x);
-		input_report_abs(star_motion_dev->input_dev, STAR_ROTVECTOR_Y, y);
-		input_report_abs(star_motion_dev->input_dev, STAR_ROTVECTOR_Z, z);
-		input_sync(star_motion_dev->input_dev);
-	}
-}
-//LGE_CHANGE_E [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
-
 /*---------------------------------------------------------------------------
   work function
   ---------------------------------------------------------------------------*/
@@ -633,6 +520,9 @@ static void motion_accel_work_func(struct work_struct *work)
 	int accel_data[3];
 
 	if(atomic_read(&bypass_flag)){
+		//get_accel_raw_data
+		//NvAccelerometerI2CGetRegsPassThrough(0x06, &raw_data[0], 6);
+		//printk ("[motion_accel_work_func] data0=[%d], data1=[%d], data2=[%d], data3=[%d], data4=[%d], data5=[%d] \n",raw_data[0],raw_data[1],raw_data[2],raw_data[3],raw_data[4],raw_data[5]);
 		kxtf9_get_acceleration_data_passthrough(accel_data);
 		current_x = accel_data[0]*10;
 		current_y = accel_data[1]*10;
@@ -669,6 +559,7 @@ static void motion_gyro_work_func(struct work_struct *work)
 	current_z = atomic_read(&gyro_z);
 
 	motion_send_gyro_detection(current_x,current_y,current_z);
+
 }
 
 static void motion_compass_work_func(struct work_struct *work)
@@ -783,7 +674,14 @@ static ssize_t motion_accel_onoff_store(struct device *dev, struct device_attrib
 {
 	u32    val;
 	val = simple_strtoul(buf, NULL, 10);
-	//	printk("[%s] gyro_flag [%d]\n",__func__,val);
+
+//	printk("%s(%d): hee.seo \n",
+//			 current->comm, task_pid_nr(current));
+
+//	printk("[%s] hee.seo gyro_flag [%d]\n",__func__,val);
+
+//	if(!strncmp("PowerManagerSer",current->comm,15))
+//		return count;
 
 	if (val) {
 		atomic_set(&accel_flag, 1);
@@ -793,7 +691,7 @@ static ssize_t motion_accel_onoff_store(struct device *dev, struct device_attrib
 		atomic_set(&accel_flag, 0);
 		//		hrtimer_cancel(&star_motion_dev->timer[0]);
 	}
-
+	notify_sensor_change_to_daemon();
 	return count;
 }
 
@@ -814,13 +712,9 @@ static ssize_t motion_tilt_onoff_store(struct device *dev, struct device_attribu
 		atomic_set(&tilt_flag, 1);
 	} else {
 		atomic_set(&tilt_flag, 0);
-
-		atomic_set(&tilt_roll,  0);
-		atomic_set(&tilt_pitch, 0);
-		atomic_set(&tilt_yaw,   0);
-		
 	}
 
+	notify_sensor_change_to_daemon();
 	return count;
 }
 
@@ -841,12 +735,9 @@ static ssize_t motion_gyro_onoff_store(struct device *dev, struct device_attribu
 		atomic_set(&gyro_flag, 1);
 	} else {
 		atomic_set(&gyro_flag, 0);
-
-		atomic_set(&gyro_x,  0);
-		atomic_set(&gyro_y, 0);
-		atomic_set(&gyro_z,   0);
 	}
 
+	notify_sensor_change_to_daemon();
 	return count;
 }
 
@@ -868,6 +759,7 @@ static ssize_t motion_compass_onoff_store(struct device *dev,  struct device_att
 		atomic_set(&compass_flag, 0);
 	}
 
+	notify_sensor_change_to_daemon();
 	return count;
 }
 
@@ -888,12 +780,32 @@ static ssize_t motion_composite_onoff_store(struct device *dev, struct device_at
 		atomic_set(&composite_flag, 1);
 	} else {
 		atomic_set(&composite_flag, 0);
-
-		atomic_set(&composite[0],  0);
-		atomic_set(&composite[1],  0);
-		atomic_set(&composite[2],  0);		
 	}
 
+	notify_sensor_change_to_daemon();
+	return count;
+}
+
+static ssize_t motion_sensor_sleep_show(struct device *dev, struct device_attribute *attr, char *buf, size_t count)
+{
+	u32    val;
+	val = atomic_read(&sleep_daemon_flag);
+	return sprintf(buf, "%d\n",val);
+}
+
+static ssize_t motion_sensor_sleep_store(struct device *dev, struct device_attribute *attr, char *buf, size_t count)
+{
+	u32    val;
+	val = simple_strtoul(buf, NULL, 10);
+	//lprintk("[motion_set_tilt_onoff_store]  flag [%d]\n",val);
+
+	if (val) {
+		atomic_set(&sleep_daemon_flag, 1);
+	} else {
+		atomic_set(&sleep_daemon_flag, 0);
+	}
+
+	notify_sensor_change_to_daemon();
 	return count;
 }
 
@@ -916,6 +828,8 @@ static ssize_t motion_tap_onoff_store(struct device *dev, struct device_attribut
 		atomic_set(&tap_flag, 0);
 	}
 
+	notify_sensor_change_to_daemon();
+	
 	return count;
 }
 
@@ -934,11 +848,12 @@ static ssize_t motion_flip_onoff_store(struct device *dev, struct device_attribu
 
 	if (val) {
 		atomic_set(&flip_flag, 1);
-		call_once = 1;
 	} else {
 		atomic_set(&flip_flag, 0);
 	}
 
+	notify_sensor_change_to_daemon();
+	
 	return count;
 }
 
@@ -960,6 +875,7 @@ static ssize_t motion_shake_onoff_store(struct device *dev,  struct device_attri
 	} else {
 		atomic_set(&shake_flag, 0);
 	}
+	notify_sensor_change_to_daemon();
 
 	return count;
 }
@@ -983,6 +899,7 @@ static ssize_t motion_snap_onoff_store(struct device *dev, struct device_attribu
 		atomic_set(&snap_flag, 0);
 	}
 
+	notify_sensor_change_to_daemon();
 	return count;
 }
 
@@ -1134,72 +1051,14 @@ static ssize_t motion_cal_onoff_store(struct device *dev, struct device_attribut
 
 	if (val) {
 		atomic_set(&cal_flag, 1);
-		atomic_set(&suspend_flag, 0);
 	} else {
 		atomic_set(&cal_flag, 0);
 	}
 
+	notify_sensor_change_to_daemon();
+	
 	return count;
 }
-
-static ssize_t motion_sensors_reboot_store(struct device *dev,  struct device_attribute *attr,const char *buf, size_t count)
-{
-	u32    val;
-	val = simple_strtoul(buf, NULL, 10);
-	//lprintk("[motion_set_shake_onoff_store]  flag [%d]\n",val);
-
-	if (val) {
-		reboot = 1; 
-	} else {
-		reboot = 0; 
-	}
-
-	return count;
-}
-
-//LGE_CHANGE_S [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
-static ssize_t motion_gravity_onoff_show(struct device *dev, struct device_attribute *attr, char *buf, size_t count)
-{
-	u32    val = atomic_read(&gravity_flag);
-	return sprintf(buf, "%d\n",val);
-}
-
-static ssize_t motion_gravity_onoff_store(struct device *dev, struct device_attribute *attr, char *buf, size_t count)
-{
-	u32    val = simple_strtoul(buf, NULL, 10);
-	atomic_set(&gravity_flag, val ? 1 : 0);
-
-	return count;
-}
-
-static ssize_t motion_linearaccel_onoff_show(struct device *dev, struct device_attribute *attr, char *buf, size_t count)
-{
-	u32    val = atomic_read(&linearaccel_flag);
-	return sprintf(buf, "%d\n",val);
-}
-
-static ssize_t motion_linearaccel_onoff_store(struct device *dev, struct device_attribute *attr, char *buf, size_t count)
-{
-	u32    val = simple_strtoul(buf, NULL, 10);
-	atomic_set(&linearaccel_flag, val ? 1 : 0);
-
-	return count;
-}
-
-static ssize_t motion_rotvector_onoff_show(struct device *dev, struct device_attribute *attr, char *buf, size_t count)
-{
-	u32    val = atomic_read(&rotvector_flag);
-	return sprintf(buf, "%d\n",val);
-}
-
-static ssize_t motion_rotvector_onoff_store(struct device *dev, struct device_attribute *attr, char *buf, size_t count)
-{
-	u32    val = simple_strtoul(buf, NULL, 10);
-	atomic_set(&rotvector_flag, val ? 1 : 0);
-
-	return count;
-}
-//LGE_CHANGE_E [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
 
 static DEVICE_ATTR(accel_onoff, 0666, motion_accel_onoff_show, motion_accel_onoff_store);
 static DEVICE_ATTR(tilt_onoff, 0666, motion_tilt_onoff_show, motion_tilt_onoff_store);
@@ -1210,11 +1069,7 @@ static DEVICE_ATTR(flip_onoff, 0666, motion_flip_onoff_show, motion_flip_onoff_s
 static DEVICE_ATTR(shake_onoff,0666, motion_shake_onoff_show, motion_shake_onoff_store);
 static DEVICE_ATTR(snap_onoff, 0666, motion_snap_onoff_show, motion_snap_onoff_store);
 static DEVICE_ATTR(composite_onoff, 0666, motion_composite_onoff_show, motion_composite_onoff_store);
-//LGE_CHANGE_S [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
-static DEVICE_ATTR(gravity_onoff, 0666, motion_gravity_onoff_show, motion_gravity_onoff_store);
-static DEVICE_ATTR(linearaccel_onoff, 0666, motion_linearaccel_onoff_show, motion_linearaccel_onoff_store);
-static DEVICE_ATTR(rotvector_onoff, 0666, motion_rotvector_onoff_show, motion_rotvector_onoff_store);
-//LGE_CHANGE_E [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
+static DEVICE_ATTR(sensor_sleep, 0666, motion_sensor_sleep_show, motion_sensor_sleep_store);
 
 static DEVICE_ATTR(accel_delay, 0666, NULL, motion_accel_delay_store);
 static DEVICE_ATTR(tilt_delay, 0666, NULL, motion_tilt_delay_store);
@@ -1225,15 +1080,13 @@ static DEVICE_ATTR(composite_delay, 0666,NULL, motion_composite_delay_store);
 //Sensor Calibration
 static DEVICE_ATTR(cal_onoff, 0666, motion_cal_onoff_show, motion_cal_onoff_store);
 
-//Sensor reboot test
-static DEVICE_ATTR(reboot, 0666, NULL, motion_sensors_reboot_store);
-
 static struct attribute *star_motion_attributes[] = {
 	&dev_attr_accel_onoff.attr,
 	&dev_attr_gyro_onoff.attr,
 	&dev_attr_tilt_onoff.attr,
 	&dev_attr_compass_onoff.attr,
 	&dev_attr_composite_onoff.attr,	
+	&dev_attr_sensor_sleep.attr,	
 	&dev_attr_tap_onoff.attr,
 	&dev_attr_shake_onoff.attr,
 	&dev_attr_snap_onoff.attr,
@@ -1243,13 +1096,7 @@ static struct attribute *star_motion_attributes[] = {
 	&dev_attr_gyro_delay.attr,
 	&dev_attr_compass_delay.attr,
 	&dev_attr_cal_onoff.attr,
-	&dev_attr_composite_delay.attr,
-	&dev_attr_reboot.attr,
-//LGE_CHANGE_S [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
-	&dev_attr_gravity_onoff.attr,
-	&dev_attr_linearaccel_onoff.attr,
-	&dev_attr_rotvector_onoff.attr,
-//LGE_CHANGE_E [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
+	&dev_attr_composite_delay.attr,	
 	NULL
 };
 
@@ -1272,6 +1119,81 @@ static int star_motion_release(struct inode *inode, struct file *file)
 	//lprintk("motion close\n");
 	return 0;
 }
+
+void notify_sensor_change_to_daemon(void)
+{
+	send_sig(SIGUSR1,sensor_task,0);
+}
+
+static int change_sensor_status(int *tmpFlag)
+{
+	/*
+0 : disable sensor
+1:  orientation (tilt)
+2:  accelerometer
+3: tap
+4: shake
+*/
+	//lprintk(".............star_motion_ioctl................\n");
+	*tmpFlag = STAR_SENSOR_NONE;
+
+	if (atomic_read(&accel_flag)) {
+		//lprintk(".............if(atomic_read(&snap_flag)){................\n");
+		*tmpFlag |= STAR_ACCELEROMETER;
+	}
+
+	if (atomic_read(&tilt_flag)) {
+		//lprintk(".............if(atomic_read(&tilt_flag)){................\n");
+		*tmpFlag |= STAR_TILT;
+	}
+
+	if (atomic_read(&gyro_flag)) {
+		//lprintk(".............if(atomic_read(&snap_flag)){................\n");
+		*tmpFlag |= STAR_GYRO;
+	}
+
+	if (atomic_read(&compass_flag)) {
+		//lprintk(".............if(atomic_read(&compass_flag)){................\n");
+		*tmpFlag |= STAR_COMPASS;
+	}
+
+	if (atomic_read(&composite_flag)) {
+		//lprintk(".............if(atomic_read(&compass_flag)){................\n");
+		*tmpFlag |= STAR_COMPOSITE;
+	}
+
+	if (atomic_read(&tap_flag)) {
+		//lprintk(".............if(atomic_read(&tap_flag)){................\n");
+//		*tmpFlag |= STAR_TAP;
+	}
+
+	if (atomic_read(&flip_flag)) {
+		//lprintk(".............if(atomic_read(&flip_flag)){................\n");
+		*tmpFlag |= STAR_FLIP;
+	}
+
+	if (atomic_read(&shake_flag)) {
+		//lprintk(".............if(atomic_read(&shake_flag)){................\n");
+		*tmpFlag |= STAR_SHAKE;
+	}
+
+	if (atomic_read(&snap_flag)) {
+		//lprintk(".............if(atomic_read(&snap_flag)){................\n");
+		*tmpFlag |= STAR_SNAP;
+	}
+
+	if (atomic_read(&cal_flag)) {
+		//lprintk(".............if(atomic_read(&cal_flag)){................\n");
+		*tmpFlag |= STAR_CALIBRATION;
+	}
+
+	if(*tmpFlag != STAR_SENSOR_NONE)
+		return *tmpFlag; 
+	else 
+		return 0;
+}
+
+
 static int count = 0 ;
 static int star_motion_ioctl(struct inode *inode, struct file *file, unsigned int cmd,unsigned long arg)
 {
@@ -1279,6 +1201,7 @@ static int star_motion_ioctl(struct inode *inode, struct file *file, unsigned in
 	unsigned char data[MAX_MOTION_DATA_LENGTH]={0,};
 	unsigned char tempbuf[200] = {0,};     /* MPU3050 i2c MAX data length */
 	unsigned char value;
+	int sensor_flag = -1;
 
 	int buf[13] = {0,};
 	int flag = 0;
@@ -1289,85 +1212,39 @@ static int star_motion_ioctl(struct inode *inode, struct file *file, unsigned in
 
 	switch (cmd) {
 		case MOTION_IOCTL_ENABLE_DISABLE:
-			/*
-0 : disable sensor
-1:  orientation (tilt)
-2:  accelerometer
-3: tap
-4: shake
-*/
-			//lprintk(".............star_motion_ioctl................\n");
-			flag = STAR_SENSOR_NONE;
 
-			if (atomic_read(&accel_flag)) {
-				//lprintk(".............if(atomic_read(&snap_flag)){................\n");
-				flag |= STAR_ACCELEROMETER;
-			}
-
-			if (atomic_read(&tilt_flag)) {
-				//lprintk(".............if(atomic_read(&tilt_flag)){................\n");
-				flag |= STAR_TILT;
-			}
-
-			if (atomic_read(&gyro_flag)) {
-				//lprintk(".............if(atomic_read(&snap_flag)){................\n");
-				flag |= STAR_GYRO;
-			}
-
-			if (atomic_read(&compass_flag)) {
-				//lprintk(".............if(atomic_read(&compass_flag)){................\n");
-				flag |= STAR_COMPASS;
-			}
-
-			if (atomic_read(&composite_flag)) {
-				//lprintk(".............if(atomic_read(&compass_flag)){................\n");
-				flag |= STAR_COMPOSITE;
-			}
-
-			if (atomic_read(&tap_flag)) {
-				//lprintk(".............if(atomic_read(&tap_flag)){................\n");
-				flag |= STAR_TAP;
-			}
-
-			if (atomic_read(&flip_flag)) {
-				//lprintk(".............if(atomic_read(&flip_flag)){................\n");
-				flag |= STAR_FLIP;
-			}
-
-			if (atomic_read(&shake_flag)) {
-				//lprintk(".............if(atomic_read(&shake_flag)){................\n");
-				flag |= STAR_SHAKE;
-			}
-
-			if (atomic_read(&snap_flag)) {
-				//lprintk(".............if(atomic_read(&snap_flag)){................\n");
-				flag |= STAR_SNAP;
-			}
-
-			if (atomic_read(&cal_flag)) {
-				//lprintk(".............if(atomic_read(&snap_flag)){................\n");
-				flag |= STAR_CALIBRATION;
-			}
-
-//LGE_CHANGE_S [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
-			if (atomic_read(&gravity_flag)) {
-				flag |= STAR_GRAVITY;
-			}
-
-			if (atomic_read(&linearaccel_flag)) {
-				flag |= STAR_LINEARACCEL;
-			}
-
-			if (atomic_read(&rotvector_flag)) {
-				flag |= STAR_ROTATIONVECTOR;
-			}
-//LGE_CHANGE_E [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
+			// check flag of sensor 
+			sensor_flag = change_sensor_status(&flag);
 
 			if (copy_to_user(argp,&flag, sizeof(flag))) {
 				//lprintk(".............MOTION_IOCTL_SNAP................\n");
 				return -EFAULT;
 			}
 			break;
+
+		case MOTION_IOCTL_WAIT_SENSOR_RUN:
+
+	//		printk(" MOTION_IOCTL_WAIT_SENSOR_RUN \n"); 
+			// check flag of sensor 
+			sensor_flag = change_sensor_status(&flag);
+
+	//		printk(" MOTION_IOCTL_WAIT_SENSOR_RUN sensor_flag [%d]\n",sensor_flag); 
+			//hee.seo
+			if(!sensor_flag) {
+			printk(" go sleep sensor_flag [%d]\n",sensor_flag); 
+				interruptible_sleep_on(&star_motion_dev->sensor_wait);
+				if (signal_pending(current))
+			    { printk(" Happen to Signal sensor_flag [%d]\n",sensor_flag); 
+					return -EINTR;
+				}
+			} 
+
+			if (copy_to_user(argp,&flag, sizeof(flag))) {
+				//lprintk(".............MOTION_IOCTL_SNAP................\n");
+				return -EFAULT;
+			}
+			break;
+	
 		case MOTION_IOCTL_ACCEL_RAW:
 			if (copy_from_user(&buf, argp, sizeof(buf))) {
 				return -EFAULT;
@@ -1425,26 +1302,6 @@ static int star_motion_ioctl(struct inode *inode, struct file *file, unsigned in
 			atomic_set(&mag_y, buf[1]);
 			atomic_set(&mag_z, buf[2]);
 			break;
-//LGE_CHANGE_S [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
-		case MOTION_IOCTL_GRAVITY:
-			if (copy_from_user(&buf, argp, sizeof(buf))) {
-				return -EFAULT;
-			}
-			motion_send_gravity_detection(buf[0], buf[1], buf[2]);
-			break;
-		case MOTION_IOCTL_LINEARACCEL:
-			if (copy_from_user(&buf, argp, sizeof(buf))) {
-				return -EFAULT;
-			}
-			motion_send_linearaccel_detection(buf[0], buf[1], buf[2]);
-			break;
-		case MOTION_IOCTL_ROTVECTOR:
-			if (copy_from_user(&buf, argp, sizeof(buf))) {
-				return -EFAULT;
-			}
-			motion_send_rotvector_detection(buf[0], buf[1], buf[2]);
-			break;
-//LGE_CHANGE_E [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
 		case MOTION_IOCTL_TAP:
 			if (copy_from_user(&buf, argp, sizeof(buf))) {
 				return -EFAULT;
@@ -1499,6 +1356,14 @@ static int star_motion_ioctl(struct inode *inode, struct file *file, unsigned in
 			}
 			break;
 		case MOTION_IOCTL_SENSOR_SUSPEND_RESUME:
+
+//			printk(" MOTION_IOCTL_SENSOR_SUSPEND_RESUME  sensor_flag [%d]\n",atomic_read(&sleep_daemon_flag)); 
+			if(atomic_read(&sleep_daemon_flag)) {
+				interruptible_sleep_on(&star_motion_dev->sensor_wait);
+				if (signal_pending(current))
+					return -EINTR;
+			}
+
 			onoff_flag = atomic_read(&suspend_flag);
 
 			if (copy_to_user(argp, &onoff_flag, sizeof(onoff_flag))) {
@@ -1677,20 +1542,28 @@ static int star_motion_ioctl(struct inode *inode, struct file *file, unsigned in
 				return -EINVAL;
 			}
 			break;
-		case MOTION_IOCTL_ACCEL_INT_ENABLE_DISABLE:
-			//lprintk(".............MOTION_IOCTL_ACCEL_INT_ENABLE_DISABLE................\n");
+		case MOTION_IOCTL_ACCEL_BYPASS_MODE:
+			//lprintk(".............MOTION_IOCTL_ACCEL_BYPASS_MODE................\n");
 			if (copy_from_user(&buf, argp, sizeof(buf))) {
 				return -EFAULT;
 			}
+#if DEBUG
+			lprintk(D_SENSOR,".............MOTION_IOCTL_ACCEL_BYPASS_MODE................\n");
+#endif
 			atomic_set(&bypass_flag, buf[0]);
-
-			break;		
-		case MOTION_IOCTL_ACCEL_INIT:
 			{
-				tegra_accel_hw_init();
-
+				int buf, buffer;
+				buf = 0x04;
+				NvAccelerometerI2CSetRegsPassThrough(0x21 ,&buf , 1);
+				buf = 0xc0;
+				NvAccelerometerI2CSetRegsPassThrough(0x1B ,&buf , 1);
+				msleep(100);
+				NvAccelerometerI2CGetRegsPassThrough (0x21 ,&buffer , 1);
+				//printk("YJ ......[0x21 ] register data = [0x%x]...\n",buffer);
+				NvAccelerometerI2CGetRegsPassThrough (0x1B ,&buffer , 1);
+				//printk("YJ ......[0x1B ] register data = [0x%x]...\n",buffer);
 			}
-			break;				
+			break;
 		case MOTION_IOCTL_CALIBRATION_FINISHED:
 			printk(".............MOTION_IOCTL_CALIBRATION_FINISHED................\n");
 			if (copy_from_user(&buf, argp, sizeof(buf))) {
@@ -1699,24 +1572,6 @@ static int star_motion_ioctl(struct inode *inode, struct file *file, unsigned in
 
 			atomic_set(&cal_flag, buf[0]);
 			atomic_set(&cal_result, buf[1]);
-			if(sensor_sleep_st == 1)
-				atomic_set(&suspend_flag, 1);
-			break;
-		case MOTION_IOCTL_COMPASS_INIT:
-			{
-				tegra_compass_hw_init();
-			}
-			break;					
-		case MOTION_IOCTL_CHECK_SENSOR_I2C_ERROR:
-			//printk("MOTION_IOCTL_CHECK_SENSOR_I2C_ERROR[%d] \n",reboot);
-			if (copy_to_user(argp, &reboot, sizeof(reboot))) {
-				return -EFAULT;
-			}
-			break;
-		case MOTION_IOCTL_REBOOT_SENSORS:
-			printk(".............MOTION_IOCTL_REBOOT_SENSORS................\n");
-
-			lge_sensor_shoutdown_all();
 			
 			break;
 
@@ -1963,95 +1818,50 @@ static struct i2c_driver gyro_i2c_driver = {
 };
 #endif
 
-static unsigned short  mpu3050_i2c_through_pass_internal(unsigned char  enable)
+void mpu3050_i2c_through_pass(int benable)
 {
-	unsigned char val_shadow=0, dummy=0;
 	unsigned char value = 0;
 	unsigned char buf;
 	int status = 0;
 
-	status = NvGyroAccelI2CGetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_USER_CTRL ,&val_shadow , 1 );
-	
-	if (status == 0) {
-		#if DEBUG
-		lprintk("[MPU3050] MPU3050_GYRO_I2C_USER_CTRL. i2c ERROR: 0x%x................................\n",val_shadow);
-		#endif
-		return 1; //error
+	NvGyroAccelI2CGetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_USER_CTRL ,&value , 1 );
+	if (status < 0) {
+#if DEBUG
+		lprintk("[MPU3050] MPU3050_GYRO_I2C_USER_CTRL. i2c ERROR: 0x%x................................\n",value);
+#endif
+		return ;
 	}
 
-	if ((val_shadow & IME_IF_ENA_POS) != (enable*IME_IF_ENA_POS))
-	{
-		//printk("Already the bypass mode = %d (On=1, Off=0).", enable);
-		return 0; //success
-	}
-
-	/* Currently, 2nd I2C is reported to have a bug. 
-	 So let me write down the s/w workaround
-	 */
-	if (enable == MPU3050_BYPASS_MODE_ON)
-	{ // bypass ON,
-		//disable I2C first
-		val_shadow &= ~IME_IF_ENA_POS;
-	}
-	else
-	{ // bypass OFF
-		val_shadow |= IME_IF_ENA_POS;
-	}
-
-       status = NvGyroAccelI2CSetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_USER_CTRL, &val_shadow, 1);
-
-	if (status == 0) {
-		#if DEBUG
-		lprintk("[MPU3050] MPU3050_GYRO_I2C_USER_CTRL. i2c ERROR: 0x%x................................\n",val_shadow);
-		#endif
-		return 1; //error
-	}
-
-	if (enable == MPU3050_BYPASS_MODE_ON)
-	{ // bypass ON
+	if (benable == MPU3050_BYPASS_MODE_ON) {
 #if DEBUG
 		lprintk(D_SENSOR,"[MPU3050] bypass on\n");
-#endif	
-		// dummy read
-		status = NvAccelerometerI2CGetRegsPassThrough (0x00 ,&dummy , 1);
-		if (status == 0) {
-			#if DEBUG
-			lprintk("[KIONIX] KIONIX_ACCEL_CHIP_ID_REG. i2c ERROR: 0x%x................................\n",dummy);
-			#endif
-			return 1; //error
-		}
+#endif
+		//if(value & 0x20)
+		value &= ~(0x20);
+
+		NvGyroAccelI2CSetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_USER_CTRL, &value, 1);
+
+		/* Accel WHO_AM_I bucause of gyro chip problem */
+		NvAccelerometerI2CSetRegsPassThrough(0x0F, &buf, 0);
+
+	} else { // bypass off
+#if DEBUG
+		lprintk(D_SENSOR,"[MPU3050] bypass off\n");
+#endif
+		//if(!(value & 0x20))
+		value |= 0x20;
+
+		NvGyroAccelI2CSetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_USER_CTRL, &value, 1);
 	}
 
-	return 0;
+#if 0  /* Delete MPU reset. It is not necessary */
+	/* MPU reset */
+	value |= 0x08;
+	NvGyroAccelI2CSetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_USER_CTRL ,&value , 1 );
+#endif
 
 }
 
-
-unsigned short mpu3050_i2c_through_pass(unsigned char enable)
-{
-	int i;
-	unsigned short result;
-	unsigned char val_shadow=0;
-	int status = 0;
-
-	for (i=0;i<3;i++)
-	{
-		result = mpu3050_i2c_through_pass_internal(enable);
-		if (result == 0) //success
-		{
-			status = NvGyroAccelI2CGetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_USER_CTRL ,&val_shadow , 1 );
-			if (status == 0) {
-				#if DEBUG
-				lprintk("[KIONIX] KIONIX_ACCEL_CHIP_ID_REG. i2c ERROR: 0x%x................................\n",dummy);
-				#endif
-				return 1; //error
-			}
-			if ((val_shadow & IME_IF_ENA_POS) == (enable*IME_IF_ENA_POS)) return 0;
-		}
-	}
-
-	return result;	
-}
 
 void mpu3050_initialize(void)
 {
@@ -2082,19 +1892,11 @@ static NvS32 star_motion_suspend(struct platform_device *pdev);
 #ifdef CONFIG_HAS_EARLYSUSPEND
 static void gyro_early_suspend(struct early_suspend *es)
 {
-#if DEBUG
-	lprintk(D_SENSOR, "--->> Gyro early suspend\n");
-#endif
-
-	//bypass
-	mpu3050_i2c_through_pass(MPU3050_BYPASS_MODE_ON);
-
-	//gyro sleep
-	mpu3050_sleep_mode();
-
-	//accel interrupt disable and accel sleep
-	motion_sensor_power_off();
-
+//#if DEBUG
+	printk("--->> Gyro early suspend\n");
+//#endif
+	//gyro_sleep_mode = 1;
+	//mdelay(200);
 	star_motion_suspend(NULL);
 	return;
 
@@ -2102,9 +1904,9 @@ static void gyro_early_suspend(struct early_suspend *es)
 
 static void gyro_late_resume(struct early_suspend *es)
 {
-#if DEBUG
-	lprintk(D_SENSOR, "--->> Gyro early resume\n");
-#endif
+//#if DEBUG
+	printk("--->> Gyro early resume\n");
+//#endif
 	star_motion_resume(NULL);
 	//gyro_sleep_mode = 0;
 	return;
@@ -2251,18 +2053,6 @@ static int __init star_motion_probe(struct platform_device *pdev)
 	set_bit(REL_DIAL, star_motion_dev->input_dev->relbit);   // SNAP - Direction
 	set_bit(REL_WHEEL, star_motion_dev->input_dev->relbit);  // FLIP
 
-//LGE_CHANGE_S [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
-	set_bit(STAR_GRAVITY_X, star_motion_dev->input_dev->absbit);		// Gravity
-	set_bit(STAR_GRAVITY_Y, star_motion_dev->input_dev->absbit);
-	set_bit(STAR_GRAVITY_Z, star_motion_dev->input_dev->absbit);
-	set_bit(STAR_LINEARACCEL_X, star_motion_dev->input_dev->absbit);	// Linear Accelerometer
-	set_bit(STAR_LINEARACCEL_Y, star_motion_dev->input_dev->absbit);
-	set_bit(STAR_LINEARACCEL_Z, star_motion_dev->input_dev->absbit);
-	set_bit(STAR_ROTVECTOR_X, star_motion_dev->input_dev->absbit);		// Rotation Vector
-	set_bit(STAR_ROTVECTOR_Y, star_motion_dev->input_dev->absbit);
-	set_bit(STAR_ROTVECTOR_Z, star_motion_dev->input_dev->absbit);
-//LGE_CHANGE_E [dongjin73.kim@lge.com] 2011-03-04, [LGE_AP20] Virtual sensor supports
-
 	err = input_register_device(star_motion_dev->input_dev);
 	if (err) {
 #if DEBUG
@@ -2287,9 +2077,9 @@ static int __init star_motion_probe(struct platform_device *pdev)
 	atomic_set(&tilt_delay, DEFAULT_MOTION_POLLING_TIME);
 #endif
 
-#if 1
-	atomic_set(&accel_x,0);
-	atomic_set(&accel_y,10240);
+#if 0
+	atomic_set(&accel_x,1024);
+	atomic_set(&accel_y,0);
 	atomic_set(&accel_z,0);
 #endif
 	/*---------------------------------------------------------------------------
@@ -2356,6 +2146,11 @@ static int __init star_motion_probe(struct platform_device *pdev)
 	}
 
 	/*---------------------------------------------------------------------------
+	  init. wait queue 
+	  ---------------------------------------------------------------------------*/
+	init_waitqueue_head(&star_motion_dev->sensor_wait);
+
+	/*---------------------------------------------------------------------------
 	  init. timer
 	  ---------------------------------------------------------------------------*/
 	// TILT POLLING TIMER
@@ -2411,21 +2206,21 @@ static int __init star_motion_probe(struct platform_device *pdev)
 	msleep(1);
 	//	mdelay(50);
 	//  Read WHO AM I
-	//value = 0;
+	value = 0;
 	//status = mpu3050_read_reg(mpu3050_i2c_client,MPU3050_GYRO_I2C_WHO_AM_I,&value);
-	//NvGyroAccelI2CGetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_WHO_AM_I ,&value , 1 );
+	NvGyroAccelI2CGetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_WHO_AM_I ,&value , 1 );
 #if DEBUG
 	lprintk("[MPU3050] MPU3050_GYRO_I2C_WHO_AM_I : %x\n",value);
 #endif
 	// Read Product ID
-	//value = 0;
+	value = 0;
 	//status = mpu3050_read_reg(mpu3050_i2c_client,MPU3050_GYRO_I2C_PRODUCT_ID,&value);
-	//NvGyroAccelI2CGetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_PRODUCT_ID ,&value , 1 );
+	NvGyroAccelI2CGetRegs(star_motion_dev->hOdmGyroAccel, MPU3050_GYRO_I2C_PRODUCT_ID ,&value , 1 );
 #if DEBUG
 	lprintk("[MPU3050] MPU3050_GYRO_I2C_PRODUCT_ID : %x\n",value);
 #endif
 #ifdef CONFIG_HAS_EARLYSUSPEND // wkkim : temporary early suspend apply
-	early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 2;
+	early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1;
 	early_suspend.suspend = gyro_early_suspend;
 	early_suspend.resume = gyro_late_resume;
 	register_early_suspend(&early_suspend);
@@ -2491,16 +2286,31 @@ int lge_sensor_verify_gyro(void)
 	return SENSOR_OK;
 }
 
-int lge_sensor_reset_gyro(void)
+int lge_sensor_shutdown_gyro(void)
 {
-	unsigned char value = 0;
-	NvOdmResetI2C(star_motion_dev->hOdmGyroAccel);
-	printk("[%s] ### Gyro ## Reset  \n",MOD_TAG);
+    close_odm_gyro_accel();
+    #if 0
+    unsigned char value = 0;
+    NvOdmResetI2C(star_motion_dev->hOdmGyroAccel);
+    printk("[%s] ### Gyro ## Reset  \n",MOD_TAG);
 
-	if(GYRO_WHID != value)
-		return SENSOR_ERROR;
-
-	return SENSOR_OK;
+    if(GYRO_WHID != value)
+        return SENSOR_ERROR;
+#endif
+    return SENSOR_OK;
+}
+int lge_sensor_restart_gyro(void)
+{
+    int err; 
+    
+    err = open_def_odm_gyro_accel();
+    if (!err) {
+        return SENSOR_ERROR;
+#if DEBUG
+        lprintk("open_def_odm_gyro_accel\n");
+#endif
+    }    
+    return SENSOR_OK;
 }
 
 static int star_motion_remove(struct platform_device *pdev)
@@ -2546,13 +2356,10 @@ void mpu3050_sleep_mode(void)
 
 		//mpu3050_write_reg(mpu3050_i2c_client,buf);
 		NvGyroAccelI2CSetRegs(star_motion_dev->hOdmGyroAccel, buf[0], &buf[1], 1);
-		msleep(5);
-
 #if DEBUG
 		lprintk("%s:%d PWR Reg : 0x%x\n", __func__, __LINE__, value);
 #endif
 	}
-
 }
 
 void mpu3050_sleep_wake_up(void)
@@ -2599,14 +2406,14 @@ void star_unset_i2c_busy()
 static NvS32 star_motion_resume(struct platform_device *pdev)
 {
 	atomic_set(&suspend_flag, 0);
-	sensor_sleep_st = 0;
+	atomic_set(&sleep_daemon_flag,0);
 	return 0;
 }
 
 static NvS32 star_motion_suspend(struct platform_device *pdev)
 {
+	printk(" set suspend_flag = 1 \n"); 
 	atomic_set(&suspend_flag, 1);
-	sensor_sleep_st = 1;
 	return 0;
 }
 
@@ -2633,7 +2440,7 @@ static int __init star_motion_init(void)
 	rwlock_init(&getbuflock);
 	memset(&accelrwbuf[0], 0, sizeof(unsigned char) * 200);
 	memset(&rwbuf[0], 0, sizeof(unsigned char) * 200);
-
+	
 
 	err = platform_driver_register(&star_motion_driver);
 

@@ -111,6 +111,15 @@
 #if defined (CONFIG_MODEM_MDM)
 #define PRODUCT_NAME_ANDROID	"P999DW"
 #define PRODUCT_NAME_EXTERNAL "P999DW SD Card"
+
+//FIDO - GB Porting [09/08/2011] - Start
+/* LGE_CHANGE_S [kino.lee@lge.com] 2011-06-08 USB-Storage-mode  name append LG-P990hN */  
+#elif (STAR_COUNTRY_CA)
+#define PRODUCT_NAME_ANDROID	"P990hN"
+#define PRODUCT_NAME_EXTERNAL "P990hN SD Card"
+/* LGE_CHANGE_E [kino.lee@lge.com] 2011-06-08 USB-Storage-mode name append LG-P990hN */
+//FIDO - GB Porting [09/08/2011] - End
+
 #elif defined (CONFIG_MODEM_IFX)
 #define PRODUCT_NAME_ANDROID	"P990"
 #define PRODUCT_NAME_EXTERNAL "P990 SD Card"
